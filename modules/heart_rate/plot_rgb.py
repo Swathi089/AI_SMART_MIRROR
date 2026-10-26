@@ -15,4 +15,4 @@ plt.title("Forehead RGB Signal")
 plt.legend()
 plt.grid()
 
-plt.show()
+plt.show(block=True)

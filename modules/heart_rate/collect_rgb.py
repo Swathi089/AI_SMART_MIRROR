@@ -1,197 +1,189 @@
+
 import cv2
 import mediapipe as mp
 import numpy as np
-import csv
+import pandas as pd
 import time
+import os
 
-camera = cv2.VideoCapture(0)
+# --------------------------------------------------
+# SETTINGS
+# --------------------------------------------------
+DURATION = 30
+CAMERA_INDEX = 0
 
-if not camera.isOpened():
+OUTPUT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "rgb_data.csv"
+)
+
+# --------------------------------------------------
+# INITIALIZE CAMERA AND MEDIAPIPE
+# --------------------------------------------------
+cap = cv2.VideoCapture(CAMERA_INDEX)
+
+if not cap.isOpened():
     print("ERROR: Could not open webcam.")
-    exit()
+    print("Check whether another application is using the camera.")
+    raise SystemExit
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
 mp_face_mesh = mp.solutions.face_mesh
 
-# Store RGB values
-rgb_data = []
+records = []
+start_time = time.perf_counter()
+last_timestamp = 0.0
 
-print("Starting RGB signal collection...")
-print("Look at the camera and remain still.")
-print("Collecting data for 30 seconds...")
+print("Starting 30-second RGB recording...")
+print("Keep your face still and look toward the camera.")
+print("Use steady, comfortable lighting.")
 print("Press Q to stop early.")
 
-start_time = time.time()
-
+# --------------------------------------------------
+# FACE MESH AND RGB COLLECTION
+# --------------------------------------------------
 with mp_face_mesh.FaceMesh(
     static_image_mode=False,
     max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+    refine_landmarks=False,
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.6
 ) as face_mesh:
 
     while True:
+        elapsed = time.perf_counter() - start_time
 
-        success, frame = camera.read()
+        if elapsed >= DURATION:
+            break
 
-        if not success:
-            print("ERROR: Could not read frame.")
+        ret, frame = cap.read()
+
+        if not ret:
+            print("ERROR: Could not read webcam frame.")
             break
 
         frame = cv2.flip(frame, 1)
+        height, width = frame.shape[:2]
 
-        rgb_frame = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2RGB
-        )
-
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = face_mesh.process(rgb_frame)
 
-        if results.multi_face_landmarks:
+        status = "Face not detected"
 
+        if results.multi_face_landmarks:
             landmarks = results.multi_face_landmarks[0].landmark
 
-            h, w, _ = frame.shape
+            # Face bounding box
+            xs = [int(p.x * width) for p in landmarks]
+            ys = [int(p.y * height) for p in landmarks]
 
-            # Find face boundaries
-            x_values = [
-                int(landmark.x * w)
-                for landmark in landmarks
-            ]
-
-            y_values = [
-                int(landmark.y * h)
-                for landmark in landmarks
-            ]
-
-            face_x1 = max(0, min(x_values))
-            face_x2 = min(w, max(x_values))
-
-            face_y1 = max(0, min(y_values))
-            face_y2 = min(h, max(y_values))
+            face_x1 = max(0, min(xs))
+            face_x2 = min(width, max(xs))
+            face_y1 = max(0, min(ys))
+            face_y2 = min(height, max(ys))
 
             face_width = face_x2 - face_x1
             face_height = face_y2 - face_y1
 
-            # Forehead ROI
-            roi_x1 = face_x1 + int(face_width * 0.20)
-            roi_x2 = face_x1 + int(face_width * 0.80)
+            # Forehead region: central upper face, above eyebrows
+            roi_x1 = max(0, face_x1 + int(face_width * 0.25))
+            roi_x2 = min(width, face_x1 + int(face_width * 0.75))
+            roi_y1 = max(0, face_y1 + int(face_height * 0.04))
+            roi_y2 = min(height, face_y1 + int(face_height * 0.18))
 
-            roi_y1 = face_y1 + int(face_height * 0.05)
-            roi_y2 = face_y1 + int(face_height * 0.22)
+            if (
+                face_width > 0
+                and face_height > 0
+                and roi_x2 > roi_x1
+                and roi_y2 > roi_y1
+            ):
+                roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
 
-            # Extract ROI
-            roi = frame[
-                roi_y1:roi_y2,
-                roi_x1:roi_x2
-            ]
+                if roi.size > 0:
+                    # Reject very dark or saturated regions
+                    brightness = float(np.mean(roi))
+                    saturation_fraction = np.mean(
+                        np.any(roi >= 250, axis=2)
+                    )
 
-            if roi.size > 0:
+                    if brightness > 20 and saturation_fraction < 0.25:
+                        # OpenCV frames use BGR channel order
+                        blue, green, red = np.mean(
+                            roi, axis=(0, 1)
+                        )
 
-                # OpenCV uses BGR
-                mean_bgr = np.mean(
-                    roi,
-                    axis=(0, 1)
-                )
+                        timestamp = time.perf_counter() - start_time
 
-                blue = mean_bgr[0]
-                green = mean_bgr[1]
-                red = mean_bgr[2]
+                        # Avoid duplicate/non-increasing timestamps
+                        if timestamp > last_timestamp:
+                            records.append({
+                                "time": timestamp,
+                                "red": float(red),
+                                "green": float(green),
+                                "blue": float(blue)
+                            })
+                            last_timestamp = timestamp
 
-                elapsed = time.time() - start_time
+                        status = "Recording RGB"
 
-                rgb_data.append([
-                    elapsed,
-                    red,
-                    green,
-                    blue
-                ])
+                    else:
+                        status = "Adjust lighting"
 
-                # Display values
-                cv2.putText(
-                    frame,
-                    f"R: {red:.1f}",
-                    (20, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2
-                )
+                    cv2.rectangle(
+                        frame,
+                        (roi_x1, roi_y1),
+                        (roi_x2, roi_y2),
+                        (0, 255, 0),
+                        2
+                    )
 
-                cv2.putText(
-                    frame,
-                    f"G: {green:.1f}",
-                    (20, 55),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2
-                )
+                    cv2.putText(
+                        frame,
+                        "Forehead ROI",
+                        (roi_x1, max(20, roi_y1 - 8)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 255, 0),
+                        2
+                    )
 
-                cv2.putText(
-                    frame,
-                    f"B: {blue:.1f}",
-                    (20, 80),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 0, 0),
-                    2
-                )
-
-                # Draw ROI
-                cv2.rectangle(
-                    frame,
-                    (roi_x1, roi_y1),
-                    (roi_x2, roi_y2),
-                    (255, 0, 0),
-                    2
-                )
-
-        elapsed = time.time() - start_time
+        remaining = max(0, DURATION - elapsed)
 
         cv2.putText(
             frame,
-            f"Time: {elapsed:.1f}s / 30s",
-            (20, 115),
+            f"{status} | Time left: {remaining:.1f}s",
+            (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (255, 255, 255),
             2
         )
 
-        cv2.imshow(
-            "AI Smart Mirror - RGB Collection",
-            frame
-        )
-
-        if elapsed >= 30:
-            break
+        cv2.imshow("Heart Rate - RGB Collection", frame)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
+            print("Recording stopped by user.")
             break
 
-camera.release()
+cap.release()
 cv2.destroyAllWindows()
 
-# Save collected RGB data
-with open(
-    "modules/heart_rate/rgb_data.csv",
-    "w",
-    newline=""
-) as file:
+# --------------------------------------------------
+# SAVE DATA
+# --------------------------------------------------
+if len(records) < 100:
+    print(f"ERROR: Only {len(records)} valid samples collected.")
+    print("Check the webcam, face detection and lighting.")
+    raise SystemExit
 
-    writer = csv.writer(file)
+df = pd.DataFrame(records)
+df.to_csv(OUTPUT_FILE, index=False)
 
-    writer.writerow([
-        "time",
-        "red",
-        "green",
-        "blue"
-    ])
-
-    writer.writerows(rgb_data)
-
-print()
-print("RGB collection completed.")
-print(f"Samples collected: {len(rgb_data)}")
-print("Saved to: modules/heart_rate/rgb_data.csv")
+print("\nRecording completed.")
+print(f"Samples collected: {len(df)}")
+print(f"Duration: {df['time'].iloc[-1]:.2f} seconds")
+print(f"Saved to: {OUTPUT_FILE}")
+print("\nFirst five rows:")
+print(df.head().to_string(index=False))
